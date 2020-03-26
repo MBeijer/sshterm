@@ -41,8 +41,7 @@ struct TermWindow {
 	Object                *Layout;
 	Object                *Term;
 	struct Hook            IDCMPHook;
-	struct Hook            OutputHook;
-	struct Hook            ResizeHook;
+	struct Hook            TermHook;
 	struct shl_ring        RingBuffer;
 	UWORD                  Columns;
 	UWORD                  Rows;
@@ -54,15 +53,20 @@ enum {
 	MID_PROJECT_MENU,
 	MID_PROJECT_ICONIFY,
 	MID_PROJECT_ABOUT,
+	MID_PROJECT_CLEARSB,
 	MID_PROJECT_CLOSE,
 	MID_EDIT_MENU,
 	MID_EDIT_COPY,
+	MID_EDIT_COPYALL,
 	MID_EDIT_PASTE,
 	MID_PALETTE_MENU,
 	MID_PALETTE_DEFAULT,
 	MID_PALETTE_SOLARIZED,
 	MID_PALETTE_SOLARIZED_BLACK,
-	MID_PALETTE_SOLARIZED_WHITE
+	MID_PALETTE_SOLARIZED_WHITE,
+	MID_PALETTE_SOFT_BLACK,
+	MID_PALETTE_BASE16_DARK,
+	MID_PALETTE_BASE16_LIGHT
 };
 
 static inline ULONG GET(Object *obj, ULONG attr)
@@ -83,9 +87,8 @@ static inline ULONG DGM(Object *obj, Object *winobj, Msg msg)
 	return IIntuition->DoGadgetMethodA((struct Gadget *)obj, window, NULL, msg);
 }
 
+static ULONG term_hook_cb(struct Hook *hook, Object *term, struct TermHookMsg *thm);
 static ULONG term_idcmp_cb(struct Hook *hook, Object *winobj, struct IntuiMessage *imsg);
-static ULONG term_output_cb(struct Hook *hook, Object *obj, struct TermOutputHookMsg *tohm);
-static ULONG term_resize_cb(struct Hook *hook, Object *obj, struct TermResizeHookMsg *trhm);
 
 static const struct NewMenu newmenus[] =
 {
@@ -93,15 +96,21 @@ static const struct NewMenu newmenus[] =
 	{ NM_ITEM, "Iconify", "I", 0, 0, (APTR)MID_PROJECT_ICONIFY },
 	{ NM_ITEM, "About...", "?", 0, 0, (APTR)MID_PROJECT_ABOUT },
 	{ NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL },
+	{ NM_ITEM, "Clear Scrollback", NULL, 0, 0, (APTR)MID_PROJECT_CLEARSB },
+	{ NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL },
 	{ NM_ITEM, "Close", "K", 0, 0, (APTR)MID_PROJECT_CLOSE },
 	{ NM_TITLE, "Edit", NULL, 0, 0, (APTR)MID_EDIT_MENU },
 	{ NM_ITEM, "Copy", "C", 0, 0, (APTR)MID_EDIT_COPY },
+	{ NM_ITEM, "Copy All", NULL, 0, 0, (APTR)MID_EDIT_COPYALL },
 	{ NM_ITEM, "Paste", "V", 0, 0, (APTR)MID_EDIT_PASTE },
 	{ NM_TITLE, "Palette", NULL, 0, 0, (APTR)MID_PALETTE_MENU },
 	{ NM_ITEM, "Default", NULL, CHECKIT | CHECKED, ~1, (APTR)MID_PALETTE_DEFAULT },
 	{ NM_ITEM, "Solarized", NULL, CHECKIT, ~2, (APTR)MID_PALETTE_SOLARIZED },
 	{ NM_ITEM, "Solarized Black", NULL, CHECKIT, ~4, (APTR)MID_PALETTE_SOLARIZED_BLACK },
 	{ NM_ITEM, "Solarized White", NULL, CHECKIT, ~8, (APTR)MID_PALETTE_SOLARIZED_WHITE },
+	{ NM_ITEM, "Soft Black", NULL, CHECKIT, ~16, (APTR)MID_PALETTE_SOFT_BLACK },
+	{ NM_ITEM, "Base16 Dark", NULL, CHECKIT, ~32, (APTR)MID_PALETTE_BASE16_DARK },
+	{ NM_ITEM, "Base16 Light", NULL, CHECKIT, ~64, (APTR)MID_PALETTE_BASE16_LIGHT },
 	{ NM_END, NULL, NULL, 0, 0, NULL }
 };
 
@@ -131,15 +140,21 @@ struct TermWindow *termwin_open(struct Screen *screen, ULONG max_sb)
 		NM_Item, "Iconify", MA_ID, MID_PROJECT_ICONIFY, MA_Key, "I",
 		NM_Item, "About...", MA_ID, MID_PROJECT_ABOUT, MA_Key, "?",
 		NM_Item, ML_SEPARATOR,
+		NM_Item, "Clear Scrollback", MA_ID, MID_PROJECT_CLEARSB,
+		NM_Item, ML_SEPARATOR,
 		NM_Item, "Close", MA_ID, MID_PROJECT_CLOSE, MA_Key, "K",
 		NM_Menu, "Edit", MA_ID, MID_EDIT_MENU,
 		NM_Item, "Copy", MA_ID, MID_EDIT_COPY, MA_Key, "C",
+		NM_Item, "Copy All", MA_ID, MID_EDIT_COPYALL,
 		NM_Item, "Paste", MA_ID, MID_EDIT_PASTE, MA_Key, "V",
 		NM_Menu, "Palette", MA_ID, MID_PALETTE_MENU,
 		NM_Item, "Default", MA_ID, MID_PALETTE_DEFAULT, MA_MX, ~1, MA_Selected, TRUE,
 		NM_Item, "Solarized", MA_ID, MID_PALETTE_SOLARIZED, MA_MX, ~2,
 		NM_Item, "Solarized Black", MA_ID, MID_PALETTE_SOLARIZED_BLACK, MA_MX, ~4,
 		NM_Item, "Solarized White", MA_ID, MID_PALETTE_SOLARIZED_WHITE, MA_MX, ~8,
+		NM_Item, "Soft Black", MA_ID, MID_PALETTE_SOFT_BLACK, MA_MX, ~16,
+		NM_Item, "Base16 Dark", MA_ID, MID_PALETTE_BASE16_DARK, MA_MX, ~32,
+		NM_Item, "Base16 Light", MA_ID, MID_PALETTE_BASE16_LIGHT, MA_MX, ~64,
 		TAG_END);
 	if (tw->MenuStrip == NULL)
 	{
@@ -154,17 +169,12 @@ struct TermWindow *termwin_open(struct Screen *screen, ULONG max_sb)
 		return NULL;
 	}
 
-	memset(&tw->OutputHook, 0, sizeof(tw->OutputHook));
-	tw->OutputHook.h_Entry = (HOOKFUNC)term_output_cb;
-	tw->OutputHook.h_Data  = tw;
-
-	memset(&tw->ResizeHook, 0, sizeof(tw->ResizeHook));
-	tw->ResizeHook.h_Entry = (HOOKFUNC)term_resize_cb;
-	tw->ResizeHook.h_Data  = tw;
+	memset(&tw->TermHook, 0, sizeof(tw->TermHook));
+	tw->TermHook.h_Entry = (HOOKFUNC)term_hook_cb;
+	tw->TermHook.h_Data  = tw;
 
 	tw->Term = IIntuition->NewObject(TermClass, NULL,
-		TERM_OutputHook, &tw->OutputHook,
-		TERM_ResizeHook, &tw->ResizeHook,
+		TERM_UserHook, &tw->TermHook,
 		TAG_END);
 
 	tw->Layout = IIntuition->NewObject(LayoutClass, NULL,
@@ -274,7 +284,7 @@ void termwin_set_palette(struct TermWindow *tw, const char *palette)
 	window = (struct Window *)GET(tw->Window, WINDOW_Window);
 
 	IIntuition->SetGadgetAttrs((struct Gadget *)tw->Term, window, NULL,
-		TERM_Palette, palette,
+		TERM_BuiltInPalette, palette,
 		TAG_END);
 }
 
@@ -287,12 +297,56 @@ void termwin_write(struct TermWindow *tw, const char *buffer, size_t len)
 	tpi.tpi_Data   = buffer;
 	tpi.tpi_Length = len;
 
+	//DGM(tw->Term, tw->Window, (Msg)&tpi);
+	IIntuition->IDoMethodA(tw->Term, (Msg)&tpi);
+}
+
+void termwin_refresh(struct TermWindow *tw)
+{
+	struct tpInput tpi;
+
+	tpi.MethodID   = TM_INPUT;
+	tpi.tpi_GInfo  = NULL;
+	tpi.tpi_Data   = NULL;
+	tpi.tpi_Length = 0;
+
 	DGM(tw->Term, tw->Window, (Msg)&tpi);
 }
 
 ULONG termwin_get_signals(struct TermWindow *tw)
 {
 	return GET(tw->Window, WINDOW_SigMask);
+}
+
+static ULONG term_hook_cb(struct Hook *hook, Object *term, struct TermHookMsg *thm)
+{
+	struct TermWindow *tw = hook->h_Data;
+	int r;
+
+	switch (thm->MethodID)
+	{
+		case THM_OUTPUT:
+			r = shl_ring_push(&tw->RingBuffer, thm->tohm_Data, thm->tohm_Length);
+			if (r < 0)
+			{
+				IExec->DebugPrintF("shl_ring_push: %d\n", r);
+			}
+			break;
+
+		case THM_RESIZE:
+			IExec->Forbid();
+			tw->Columns = thm->trhm_Columns;
+			tw->Rows    = thm->trhm_Rows;
+			tw->NewSize = TRUE;
+			IExec->Permit();
+			break;
+
+		case THM_BELL:
+			IIntuition->DisplayBeep(tw->Screen);
+			break;
+	}
+
+	return 0;
 }
 
 static ULONG term_idcmp_cb(struct Hook *hook, Object *winobj, struct IntuiMessage *imsg)
@@ -369,7 +423,10 @@ BOOL termwin_handle_input(struct TermWindow *tw)
 		NULL,
 		"solarized",
 		"solarized-black",
-		"solarized-white"
+		"solarized-white",
+		"soft-black",
+		"base16-dark",
+		"base16-light"
 	};
 
 	while ((result = IIntuition->IDoMethod(tw->Window, WM_HANDLEINPUT, &code)) != WMHI_LASTMSG)
@@ -402,12 +459,26 @@ BOOL termwin_handle_input(struct TermWindow *tw)
 							aboutwin_open(tw->Screen);
 							break;
 
+						case MID_PROJECT_CLEARSB:
+							tpg.MethodID  = TM_CLEARSB;
+							tpg.tpg_GInfo = NULL;
+
+							DGM(tw->Term, tw->Window, (Msg)&tpg);
+							break;
+
 						case MID_PROJECT_CLOSE:
 							done = TRUE;
 							break;
 
 						case MID_EDIT_COPY:
 							tpg.MethodID  = TM_COPY;
+							tpg.tpg_GInfo = NULL;
+
+							IIntuition->IDoMethodA(tw->Term, (Msg)&tpg);
+							break;
+
+						case MID_EDIT_COPYALL:
+							tpg.MethodID  = TM_COPYALL;
 							tpg.tpg_GInfo = NULL;
 
 							IIntuition->IDoMethodA(tw->Term, (Msg)&tpg);
@@ -424,6 +495,9 @@ BOOL termwin_handle_input(struct TermWindow *tw)
 						case MID_PALETTE_SOLARIZED:
 						case MID_PALETTE_SOLARIZED_BLACK:
 						case MID_PALETTE_SOLARIZED_WHITE:
+						case MID_PALETTE_SOFT_BLACK:
+						case MID_PALETTE_BASE16_DARK:
+						case MID_PALETTE_BASE16_LIGHT:
 							termwin_set_palette(tw, palette_name[mid - MID_PALETTE_DEFAULT]);
 							break;
 					}
@@ -445,22 +519,6 @@ BOOL termwin_handle_input(struct TermWindow *tw)
 	return done;
 }
 
-static ULONG term_output_cb(struct Hook *hook, Object *obj, struct TermOutputHookMsg *tohm)
-{
-	struct TermWindow *tw = hook->h_Data;
-	CONST_STRPTR u8 = tohm->tohm_Data;
-	ULONG len = tohm->tohm_Length;
-	int r;
-
-	r = shl_ring_push(&tw->RingBuffer, u8, len);
-	if (r < 0)
-	{
-		IExec->DebugPrintF("shl_ring_push: %d\n", r);
-	}
-
-	return 0;
-}
-
 size_t termwin_poll(struct TermWindow *tw)
 {
 	return tw->RingBuffer.used;
@@ -477,19 +535,6 @@ ssize_t termwin_read(struct TermWindow *tw, char *buffer, size_t len)
 	}
 
 	return n;
-}
-
-static ULONG term_resize_cb(struct Hook *hook, Object *obj, struct TermResizeHookMsg *trhm)
-{
-	struct TermWindow *tw = hook->h_Data;
-
-	IExec->Forbid();
-	tw->Columns = trhm->trhm_Columns;
-	tw->Rows    = trhm->trhm_Rows;
-	tw->NewSize = TRUE;
-	IExec->Permit();
-
-	return 0;
 }
 
 BOOL termwin_poll_new_size(struct TermWindow *tw)

@@ -1,6 +1,7 @@
 /*
  * libtsm - Unicode Handling
  *
+ * Copyright (c) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
  * Copyright (c) 2011-2013 David Herrmann <dh.herrmann@gmail.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -57,7 +58,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
-#include "external/wcwidth.h"
+#include "wcwidth/wcwidth.h"
 #include "libtsm.h"
 #include "libtsm-int.h"
 #include "shl-array.h"
@@ -327,6 +328,18 @@ unsigned int tsm_symbol_get_width(struct tsm_symbol_table *tbl,
 	return tsm_ucs4_get_width(*ch);
 }
 
+SHL_EXPORT
+unsigned int tsm_ucs4_get_width(uint32_t ucs4)
+{
+	int ret;
+
+	ret = wcwidth(ucs4);
+	if (ret <= 0)
+		return 0;
+
+	return ret;
+}
+
 /*
  * Convert UCS4 character to UTF-8. This creates one of:
  *   0xxxxxxx
@@ -348,15 +361,25 @@ unsigned int tsm_symbol_get_width(struct tsm_symbol_table *tbl,
  */
 
 SHL_EXPORT
-unsigned int tsm_ucs4_get_width(uint32_t ucs4)
+size_t tsm_ucs4_get_len(uint32_t g)
 {
-	int ret;
-
-	ret = mk_wcwidth(ucs4);
-	if (ret <= 0)
+	if (g >= 0xd800 && g <= 0xdfff)
+		return 0;
+	if (g > 0x10ffff || (g & 0xffff) == 0xffff || (g & 0xffff) == 0xfffe)
+		return 0;
+	if (g >= 0xfdd0 && g <= 0xfdef)
 		return 0;
 
-	return ret;
+	if (g < (1 << 7))
+		return 1;
+	else if (g < (1 << (5 + 6)))
+		return 2;
+	else if (g < (1 << (4 + 6 + 6)))
+		return 3;
+	else if (g < (1 << (3 + 6 + 6 + 6)))
+		return 4;
+	else
+		return 0;
 }
 
 SHL_EXPORT

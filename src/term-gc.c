@@ -79,8 +79,7 @@ struct TermData
 	struct RastPort   *td_RPort;
 	ULONG              td_Age;
 
-	struct Hook       *td_OutputHook;
-	struct Hook       *td_ResizeHook;
+	struct Hook       *td_UserHook;
 
 	UWORD              td_MouseMode;
 	UWORD              td_NumClicks;
@@ -111,6 +110,8 @@ struct TermData
 	ULONG              td_SkipCount;
 	ULONG              td_UpdateCount;
 	#endif
+
+	struct Screen     *td_Screen;
 };
 
 enum {
@@ -152,6 +153,7 @@ static ULONG TERM_handlekeyboard(Class *cl, Object *obj, struct tpKeyboard *tpk)
 static ULONG TERM_handlemouse(Class *cl, Object *obj, struct tpMouse *tpm);
 static ULONG TERM_copy(Class *cl, Object *obj, struct tpGeneric *tpg);
 static ULONG TERM_paste(Class *cl, Object *obj, struct tpGeneric *tpg);
+static ULONG TERM_clearsb(Class *cl, Object *obj, struct tpGeneric *tpg);
 
 static ULONG TERM_dispatch(Class *cl, Object *obj, Msg msg)
 {
@@ -213,11 +215,16 @@ static ULONG TERM_dispatch(Class *cl, Object *obj, Msg msg)
 			break;
 
 		case TM_COPY:
+		case TM_COPYALL:
 			result = TERM_copy(cl, obj, (struct tpGeneric *)msg);
 			break;
 
 		case TM_PASTE:
 			result = TERM_paste(cl, obj, (struct tpGeneric *)msg);
+			break;
+
+		case TM_CLEARSB:
+			result = TERM_clearsb(cl, obj, (struct tpGeneric *)msg);
 			break;
 
 		default:
@@ -252,14 +259,29 @@ static void tsm_write_cb(struct tsm_vte *vte, const char *u8,
 {
 	struct TermData *td = data;
 
-	if (td->td_OutputHook != NULL)
+	if (td->td_UserHook != NULL)
 	{
-		struct TermOutputHookMsg tohm;
+		struct TermHookMsg thm;
 
-		tohm.tohm_Data   = u8;
-		tohm.tohm_Length = len;
+		thm.MethodID    = THM_OUTPUT;
+		thm.tohm_Data   = u8;
+		thm.tohm_Length = len;
 
-		call_hook(td, td->td_OutputHook, &tohm);
+		call_hook(td, td->td_UserHook, &thm);
+	}
+}
+
+static void tsm_bell_cb(struct tsm_vte *vte, void *data)
+{
+	struct TermData *td = data;
+
+	if (td->td_UserHook != NULL)
+	{
+		struct TermHookMsg thm;
+
+		thm.MethodID = THM_BELL;
+
+		call_hook(td, td->td_UserHook, &thm);
 	}
 }
 
@@ -290,6 +312,8 @@ static ULONG TERM_new(Class *cl, Object *obj, struct opSet *ops)
 			IIntuition->ICoerceMethod(cl, obj, OM_DISPOSE);
 			return (ULONG)NULL;
 		}
+
+		tsm_vte_set_bell_cb(td->td_VTE, tsm_bell_cb, td);
 
 		td->td_Columns = tsm_screen_get_width(td->td_Con);
 		td->td_Rows    = tsm_screen_get_height(td->td_Con);
@@ -362,16 +386,16 @@ static ULONG TERM_get(Class *cl, Object *obj, struct opGet *opg)
 
 	switch (opg->opg_AttrID)
 	{
+		case TERM_UserHook:
+			*opg->opg_Storage = (ULONG)td->td_UserHook;
+			break;
+
 		case TERM_Columns:
 			*opg->opg_Storage = td->td_Columns;
 			break;
 
 		case TERM_Rows:
 			*opg->opg_Storage = td->td_Rows;
-			break;
-
-		case TERM_OutputHook:
-			*opg->opg_Storage = (ULONG)td->td_OutputHook;
 			break;
 
 		case TERM_Font:
@@ -396,10 +420,6 @@ static ULONG TERM_get(Class *cl, Object *obj, struct opGet *opg)
 
 		case TERM_SBTotal:
 			*opg->opg_Storage = td->td_SBTotal;
-			break;
-
-		case TERM_ResizeHook:
-			*opg->opg_Storage = (ULONG)td->td_ResizeHook;
 			break;
 
 		default:
@@ -448,8 +468,8 @@ static ULONG TERM_set(Class *cl, Object *obj, struct opSet *ops)
 	{
 		switch (tag->ti_Tag)
 		{
-			case TERM_OutputHook:
-				td->td_OutputHook = (struct Hook *)tag->ti_Data;
+			case TERM_UserHook:
+				td->td_UserHook = (struct Hook *)tag->ti_Data;
 				break;
 
 			case TERM_Font:
@@ -524,14 +544,11 @@ static ULONG TERM_set(Class *cl, Object *obj, struct opSet *ops)
 				}
 				break;
 
-			case TERM_ResizeHook:
-				td->td_ResizeHook = (struct Hook *)tag->ti_Data;
-				break;
-
-			case TERM_Palette:
-				tsm_vte_set_palette(td->td_VTE, (const char *)tag->ti_Data);
-				/* Force a complete refresh */
-				refresh = TRUE;
+			case TERM_BuiltInPalette:
+				if (tsm_vte_set_palette(td->td_VTE, (const char *)tag->ti_Data) == 0)
+				{
+					refresh = TRUE;
+				}
 				break;
 		}
 	}
@@ -540,6 +557,7 @@ static ULONG TERM_set(Class *cl, Object *obj, struct opSet *ops)
 	{
 		IIntuition->DoRender(obj, ops->ops_GInfo, GREDRAW_UPDATE);
 		refresh = FALSE;
+		scroll = 0;
 	}
 	else if (scroll != 0 && ops->ops_GInfo != NULL)
 	{
@@ -585,40 +603,6 @@ static ULONG TERM_domain(Class *cl, Object *obj, struct gpDomain *gpd)
 	return 1;
 }
 
-static void update_scroller(struct TermData *td, struct GadgetInfo *ginfo)
-{
-	ULONG top, visible, total;
-
-	top     = tsm_screen_get_sb_top(td->td_Con);
-	visible = tsm_screen_get_sb_visible(td->td_Con);
-	total   = tsm_screen_get_sb_total(td->td_Con);
-
-	if ((top + visible) > total)
-	{
-		ULONG newtop = total - visible;
-		tsm_screen_sb_up(td->td_Con, top - newtop);
-		top = newtop;
-	}
-
-	if (top     != td->td_SBTop ||
-	    visible != td->td_SBVisible ||
-	    total   != td->td_SBTotal)
-	{
-		td->td_SBTop     = top;
-		td->td_SBVisible = visible;
-		td->td_SBTotal   = total;
-
-		if (td->td_Scroller != NULL)
-		{
-			SetAttrsGI(td->td_Scroller, ginfo,
-				SCROLLER_Total,   td->td_SBTotal,
-				SCROLLER_Visible, td->td_SBVisible,
-				SCROLLER_Top,     td->td_SBTop,
-				TAG_END);
-		}
-	}
-}
-
 static ULONG TERM_layout(Class *cl, Object *obj, struct gpLayout *gpl)
 {
 	struct TermData *td = INST_DATA(cl, obj);
@@ -641,6 +625,7 @@ static ULONG TERM_layout(Class *cl, Object *obj, struct gpLayout *gpl)
 	if (columns != td->td_Columns || rows != td->td_Rows)
 	{
 		UNUSED int r;
+		ULONG top, visible, total;
 
 		r = tsm_screen_resize(td->td_Con, columns, rows);
 		#ifdef DEBUG
@@ -652,17 +637,45 @@ static ULONG TERM_layout(Class *cl, Object *obj, struct gpLayout *gpl)
 		td->td_Columns = tsm_screen_get_width(td->td_Con);
 		td->td_Rows = tsm_screen_get_height(td->td_Con);
 
-		if (td->td_ResizeHook != NULL)
+		if (td->td_UserHook != NULL)
 		{
-			struct TermResizeHookMsg trhm;
+			struct TermHookMsg thm;
 
-			trhm.trhm_Columns = td->td_Columns;
-			trhm.trhm_Rows    = td->td_Rows;
+			thm.MethodID     = THM_RESIZE;
+			thm.trhm_Columns = td->td_Columns;
+			thm.trhm_Rows    = td->td_Rows;
 
-			call_hook(td, td->td_ResizeHook, &trhm);
+			call_hook(td, td->td_UserHook, &thm);
 		}
 
-		update_scroller(td, gpl->gpl_GInfo);
+		top     = tsm_screen_get_sb_top(td->td_Con);
+		visible = tsm_screen_get_sb_visible(td->td_Con);
+		total   = tsm_screen_get_sb_total(td->td_Con);
+
+		if ((top + visible) > total)
+		{
+			ULONG newtop = total - visible;
+			tsm_screen_sb_up(td->td_Con, top - newtop);
+			top = newtop;
+		}
+
+		if (top     != td->td_SBTop ||
+			visible != td->td_SBVisible ||
+			total   != td->td_SBTotal)
+		{
+			td->td_SBTop     = top;
+			td->td_SBVisible = visible;
+			td->td_SBTotal   = total;
+
+			if (td->td_Scroller != NULL)
+			{
+				SetAttrsGI(td->td_Scroller, gpl->gpl_GInfo,
+					SCROLLER_Total,   td->td_SBTotal,
+					SCROLLER_Visible, td->td_SBVisible,
+					SCROLLER_Top,     td->td_SBTop,
+					TAG_END);
+			}
+		}
 	}
 
 	td->td_Width = td->td_Columns * td->td_CellW;
@@ -701,7 +714,7 @@ static TEXT map_unicode(const ULONG *maptable, ULONG unicode)
 	return ch;
 }
 
-static int tsm_draw_cb(struct tsm_screen *con, uint32_t id,
+static int tsm_draw_cb(struct tsm_screen *con, uint64_t id,
                        const uint32_t *ch, size_t len, unsigned int width,
                        unsigned int posx, unsigned int posy,
                        const struct tsm_screen_attr *attr, tsm_age_t age,
@@ -1078,29 +1091,32 @@ static ULONG TERM_input(Class *cl, Object *obj, struct tpInput *tpi)
 
 	tsm_vte_input(td->td_VTE, tpi->tpi_Data, tpi->tpi_Length);
 
-	top     = tsm_screen_get_sb_top(td->td_Con);
-	visible = tsm_screen_get_sb_visible(td->td_Con);
-	total   = tsm_screen_get_sb_total(td->td_Con);
-
-	if (top     != td->td_SBTop ||
-	    visible != td->td_SBVisible ||
-	    total   != td->td_SBTotal)
+	if (tpi->tpi_GInfo != NULL)
 	{
-		td->td_SBTop     = top;
-		td->td_SBVisible = visible;
-		td->td_SBTotal   = total;
+		top     = tsm_screen_get_sb_top(td->td_Con);
+		visible = tsm_screen_get_sb_visible(td->td_Con);
+		total   = tsm_screen_get_sb_total(td->td_Con);
 
-		if (td->td_Scroller != NULL)
+		if (top     != td->td_SBTop ||
+			visible != td->td_SBVisible ||
+			total   != td->td_SBTotal)
 		{
-			SetAttrsGI(td->td_Scroller, tpi->tpi_GInfo,
-				SCROLLER_Total,   td->td_SBTotal,
-				SCROLLER_Visible, td->td_SBVisible,
-				SCROLLER_Top,     td->td_SBTop,
-				TAG_END);
-		}
-	}
+			td->td_SBTop     = top;
+			td->td_SBVisible = visible;
+			td->td_SBTotal   = total;
 
-	IIntuition->DoRender(obj, tpi->tpi_GInfo, GREDRAW_UPDATE);
+			if (td->td_Scroller != NULL)
+			{
+				SetAttrsGI(td->td_Scroller, tpi->tpi_GInfo,
+					SCROLLER_Total,   td->td_SBTotal,
+					SCROLLER_Visible, td->td_SBVisible,
+					SCROLLER_Top,     td->td_SBTop,
+					TAG_END);
+			}
+		}
+
+		IIntuition->DoRender(obj, tpi->tpi_GInfo, GREDRAW_UPDATE);
+	}
 
 	return 1;
 }
@@ -1244,8 +1260,10 @@ static ULONG TERM_handlemouse(Class *cl, Object *obj, struct tpMouse *tpm)
 		}
 	}
 
-	if (refresh)
+	if (refresh && tpm->tpm_GInfo != NULL)
+	{
 		IIntuition->DoRender(obj, tpm->tpm_GInfo, GREDRAW_UPDATE);
+	}
 
 	return 0;
 }
@@ -1399,7 +1417,11 @@ static ULONG TERM_copy(Class *cl, Object *obj, struct tpGeneric *tpg)
 	ULONG utf8_len;
 	ULONG result = 0;
 
-	utf8_len = tsm_screen_selection_copy(td->td_Con, &utf8);
+	if (tpg->MethodID == TM_COPY)
+		utf8_len = tsm_screen_selection_copy(td->td_Con, &utf8);
+	else
+		utf8_len = tsm_screen_copy_all(td->td_Con, &utf8);
+
 	if (utf8_len > 0)
 	{
 		result = write_clip(PRIMARY_CLIP, utf8, utf8_len);
@@ -1533,7 +1555,6 @@ static BOOL read_clip(ULONG unit, STRPTR *utf8, ULONG *utf8_len)
 			TEXT ch;
 			STRPTR u8;
 			ULONG i, u8_len;
-			TEXT tmp[4];
 
 			maptable = (const ULONG *)IDiskfont->ObtainCharsetInfo(DFCS_NUMBER, charset, DFCS_MAPTABLE);
 			if (maptable == NULL)
@@ -1545,7 +1566,7 @@ static BOOL read_clip(ULONG unit, STRPTR *utf8, ULONG *utf8_len)
 				ch = text[i];
 				if (ch >= 128)
 				{
-					u8_len += tsm_ucs4_to_utf8(maptable[(UBYTE)ch], tmp);
+					u8_len += tsm_ucs4_get_len(maptable[(UBYTE)ch]);
 				}
 				else
 				{
@@ -1632,9 +1653,39 @@ static ULONG TERM_paste(Class *cl, Object *obj, struct tpGeneric *tpg)
 
 		free(utf8);
 
-		IIntuition->DoRender(obj, tpg->tpg_GInfo, GREDRAW_UPDATE);
+		if (tpg->tpg_GInfo != NULL)
+		{
+			IIntuition->DoRender(obj, tpg->tpg_GInfo, GREDRAW_UPDATE);
+		}
 	}
 
 	return result;
+}
+
+static ULONG TERM_clearsb(Class *cl, Object *obj, struct tpGeneric *tpg)
+{
+	struct TermData *td = INST_DATA(cl, obj);
+
+	tsm_screen_clear_sb(td->td_Con);
+
+	if (tpg->tpg_GInfo != NULL)
+	{
+		td->td_SBTop     = tsm_screen_get_sb_top(td->td_Con);
+		td->td_SBVisible = tsm_screen_get_sb_visible(td->td_Con);
+		td->td_SBTotal   = tsm_screen_get_sb_total(td->td_Con);
+
+		if (td->td_Scroller != NULL)
+		{
+			SetAttrsGI(td->td_Scroller, tpg->tpg_GInfo,
+				SCROLLER_Total,   td->td_SBTotal,
+				SCROLLER_Visible, td->td_SBVisible,
+				SCROLLER_Top,     td->td_SBTop,
+				TAG_END);
+		}
+
+		IIntuition->DoRender(obj, tpg->tpg_GInfo, GREDRAW_UPDATE);
+	}
+
+	return TRUE;
 }
 

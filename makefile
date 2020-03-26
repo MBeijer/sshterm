@@ -19,6 +19,8 @@ CFLAGS  = $(OPTIMIZE) $(DEBUG) $(INCLUDES) $(WARNINGS) $(DEFINES)
 LDFLAGS = -static
 LIBS    = 
 
+STRIPFLAGS = -R.comment --strip-unneeded-rel-relocs
+
 SRCS = start.c main.c termwin.c menus.c about.c signal-pid.c term-gc.c \
        bsdsocket-stubs.c amissl-stubs.c zlib-stubs.c malloc.c
 
@@ -40,8 +42,10 @@ obj/%.o: src/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(LIBSSH2DIR)/libssh2.a: build-libssh2
+	@true
 
 libtsm/libtsm.a: build-libtsm
+	@true
 
 obj/start.o: src/sshterm.h src/term-gc.h $(TARGET)_rev.h
 obj/main.o: src/sshterm.h $(TARGET)_rev.h
