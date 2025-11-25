@@ -1,7 +1,7 @@
 /*
  * TSM - Main Header
  *
- * Copyright (c) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (c) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  * Copyright (c) 2018 Aetf <aetf@unlimitedcodeworks.xyz>
  * Copyright (c) 2011-2013 David Herrmann <dh.herrmann@gmail.com>
  *
@@ -149,13 +149,13 @@ typedef uint32_t tsm_symbol_t;
 struct tsm_screen;
 typedef uint_fast32_t tsm_age_t;
 
-#define TSM_SCREEN_INSERT_MODE	0x01
-#define TSM_SCREEN_AUTO_WRAP	0x02
-#define TSM_SCREEN_REL_ORIGIN	0x04
-#define TSM_SCREEN_INVERSE	0x08
-#define TSM_SCREEN_HIDE_CURSOR	0x10
-#define TSM_SCREEN_FIXED_POS	0x20
-#define TSM_SCREEN_ALTERNATE	0x40
+#define TSM_SCREEN_INSERT_MODE 0x01
+#define TSM_SCREEN_AUTO_WRAP   0x02
+#define TSM_SCREEN_REL_ORIGIN  0x04
+#define TSM_SCREEN_INVERSE     0x08
+#define TSM_SCREEN_HIDE_CURSOR 0x10
+#define TSM_SCREEN_FIXED_POS   0x20
+#define TSM_SCREEN_ALTERNATE   0x40
 
 struct tsm_screen_attr {
 	int8_t fccode;			/* foreground color code or <0 for rgb */
@@ -175,7 +175,6 @@ struct tsm_screen_attr {
 };
 
 typedef int (*tsm_screen_draw_cb) (struct tsm_screen *con,
-                                   uint64_t id,
                                    const uint32_t *ch,
                                    size_t len,
                                    unsigned int width,
@@ -255,6 +254,7 @@ void tsm_screen_erase_screen(struct tsm_screen *con, bool protect);
 unsigned int tsm_screen_get_sb_top(struct tsm_screen *con);
 unsigned int tsm_screen_get_sb_visible(struct tsm_screen *con);
 unsigned int tsm_screen_get_sb_total(struct tsm_screen *con);
+bool tsm_screen_blink(struct tsm_screen *con);
 
 void tsm_screen_selection_reset(struct tsm_screen *con);
 void tsm_screen_selection_start(struct tsm_screen *con,
@@ -272,7 +272,7 @@ int tsm_screen_selection_copy(struct tsm_screen *con, char **out);
 int tsm_screen_copy_all(struct tsm_screen *con, char **out);
 
 tsm_age_t tsm_screen_draw(struct tsm_screen *con, tsm_screen_draw_cb draw_cb,
-			  void *data);
+                          void *data);
 
 /** @} */
 
@@ -294,6 +294,26 @@ tsm_age_t tsm_screen_draw(struct tsm_screen *con, tsm_screen_draw_cb draw_cb,
 /* virtual terminal emulator */
 
 struct tsm_vte;
+
+/* terminal flags */
+#define TSM_VTE_FLAG_CURSOR_KEY_MODE             0x00000001 /* DEC cursor key mode */
+#define TSM_VTE_FLAG_KEYPAD_APPLICATION_MODE     0x00000002 /* DEC keypad application mode; TODO: toggle on numlock? */
+#define TSM_VTE_FLAG_LINE_FEED_NEW_LINE_MODE     0x00000004 /* DEC line-feed/new-line mode */
+#define TSM_VTE_FLAG_8BIT_MODE                   0x00000008 /* Disable UTF-8 mode and enable 8bit compatible mode */
+#define TSM_VTE_FLAG_7BIT_MODE                   0x00000010 /* Disable 8bit mode and use 7bit compatible mode */
+#define TSM_VTE_FLAG_USE_C1                      0x00000020 /* Explicitly use 8bit C1 codes; TODO: implement */
+#define TSM_VTE_FLAG_KEYBOARD_ACTION_MODE        0x00000040 /* Disable keyboard; TODO: implement? */
+#define TSM_VTE_FLAG_INSERT_REPLACE_MODE         0x00000080 /* Enable insert mode */
+#define TSM_VTE_FLAG_SEND_RECEIVE_MODE           0x00000100 /* Disable local echo */
+#define TSM_VTE_FLAG_TEXT_CURSOR_MODE            0x00000200 /* Show cursor */
+#define TSM_VTE_FLAG_INVERSE_SCREEN_MODE         0x00000400 /* Inverse colors */
+#define TSM_VTE_FLAG_ORIGIN_MODE                 0x00000800 /* Relative origin for cursor */
+#define TSM_VTE_FLAG_AUTO_WRAP_MODE              0x00001000 /* Auto line wrap mode */
+#define TSM_VTE_FLAG_AUTO_REPEAT_MODE            0x00002000 /* Auto repeat key press; TODO: implement */
+#define TSM_VTE_FLAG_NATIONAL_CHARSET_MODE       0x00004000 /* Send keys from nation charsets; TODO: implement */
+#define TSM_VTE_FLAG_BACKGROUND_COLOR_ERASE_MODE 0x00008000 /* Set background color on erase (bce) */
+#define TSM_VTE_FLAG_PREPEND_ESCAPE              0x00010000 /* Prepend escape character to next output */
+#define TSM_VTE_FLAG_TITE_INHIBIT_MODE           0x00020000 /* Prevent switching to alternate screen buffer */
 
 /* keep in sync with shl_xkb_mods */
 enum tsm_vte_modifier {
@@ -422,19 +442,32 @@ int tsm_vte_set_palette_rgb(struct tsm_vte *vte, const uint8_t (*palette)[3]);
 const uint8_t (*tsm_vte_get_palette_rgb(struct tsm_vte *vte))[3];
 
 void tsm_vte_get_def_attr(struct tsm_vte *vte, struct tsm_screen_attr *out);
+unsigned int tsm_vte_get_flags(struct tsm_vte *vte);
 
 void tsm_vte_reset(struct tsm_vte *vte);
 void tsm_vte_hard_reset(struct tsm_vte *vte);
 void tsm_vte_input(struct tsm_vte *vte, const char *u8, size_t len);
-#ifndef __amigaos4__
-bool tsm_vte_handle_keyboard(struct tsm_vte *vte, uint32_t keysym,
-                             uint32_t ascii, unsigned int mods,
-                             uint32_t unicode);
-#endif
+
+/**
+ * @brief Set backspace key to send either backspace or delete.
+ *
+ * Some terminals send ASCII backspace (010, 8, 0x08), some send ASCII delete
+ * (0177, 127, 0x7f).
+ *
+ * The default for vte is to send ASCII backspace.
+ *
+ * @param vte The vte object to set on
+ * @param enable Send ASCII delete if \c true, send ASCII backspace if \c false.
+ */
+void tsm_vte_set_backspace_sends_delete(struct tsm_vte *vte, bool enable);
 #ifdef __amigaos4__
 bool tsm_vte_handle_keyboard_amiga(struct tsm_vte *vte, uint16_t code,
                                    uint16_t qualifier, uint32_t unicode);
-#endif
+#else
+bool tsm_vte_handle_keyboard(struct tsm_vte *vte, uint32_t keysym,
+                             uint32_t ascii, unsigned int mods,
+                             uint32_t unicode);
+#endif /* __amigaos4__ */
 
 /** @} */
 

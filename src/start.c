@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -40,6 +40,7 @@ struct UtilityIFace        *IUtility;
 struct DiskfontIFace       *IDiskfont;
 struct GraphicsIFace       *IGraphics;
 struct IntuitionIFace      *IIntuition;
+struct AslIFace            *IAsl;
 struct KeymapIFace         *IKeymap;
 struct LayersIFace         *ILayers;
 struct IconIFace           *IIcon;
@@ -71,8 +72,7 @@ int h_errno;
 
 int main(int argc, char **argv)
 {
-	struct Library *AmiSSLBase = NULL;
-	int             rc         = RETURN_ERROR;
+	int rc = RETURN_ERROR;
 
 	/* Disable newlib CTRL-C handling. */
 	signal(SIGINT, SIG_IGN);
@@ -106,6 +106,12 @@ int main(int argc, char **argv)
 
 		IIntuition = (struct IntuitionIFace *)open_interface("intuition.library", 53);
 		if (IIntuition == NULL)
+		{
+			break;
+		}
+
+		IAsl = (struct AslIFace *)open_interface("asl.library", 53);
+		if (IAsl == NULL)
 		{
 			break;
 		}
@@ -155,27 +161,12 @@ int main(int argc, char **argv)
 			break;
 		}
 
-		if (!IAmiSSLMaster->InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE))
-		{
-			break;
-		}
-
-		AmiSSLBase = IAmiSSLMaster->OpenAmiSSL();
-		if (AmiSSLBase == NULL)
-		{
-			break;
-		}
-
-		IAmiSSL = (struct AmiSSLIFace *)IExec->GetInterface(AmiSSLBase, "main", 1, NULL);
-		if (IAmiSSL == NULL)
-		{
-			break;
-		}
-
-		if (IAmiSSL->InitAmiSSL(
-			AmiSSL_ErrNoPtr, __errno(),
-			AmiSSL_ISocket,  ISocket,
-			TAG_END))
+		if (IAmiSSLMaster->OpenAmiSSLTags(AMISSL_CURRENT_VERSION,
+			AmiSSL_UsesOpenSSLStructs, TRUE,
+			AmiSSL_GetIAmiSSL,         &IAmiSSL,
+			AmiSSL_ISocket,            ISocket,
+			AmiSSL_ErrNoPtr,           __errno(),
+			TAG_END) != 0)
 		{
 			break;
 		}
@@ -318,19 +309,12 @@ int main(int argc, char **argv)
 		IGadTools = NULL;
 	}
 
-	if (IAmiSSL != NULL)
-	{
-		IAmiSSL->CleanupAmiSSL(TAG_END);
-		IExec->DropInterface((struct Interface *)IAmiSSL);
-		IAmiSSL = NULL;
-	}
-
 	libssh2_exit();
 
-	if (AmiSSLBase != NULL)
+	if (IAmiSSL != NULL)
 	{
 		IAmiSSLMaster->CloseAmiSSL();
-		AmiSSLBase = NULL;
+		IAmiSSL = NULL;
 	}
 
 	if (IAmiSSLMaster != NULL)
@@ -367,6 +351,12 @@ int main(int argc, char **argv)
 	{
 		close_interface((struct Interface *)IKeymap);
 		IKeymap = NULL;
+	}
+
+	if (IAsl != NULL)
+	{
+		close_interface((struct Interface *)IAsl);
+		IAsl = NULL;
 	}
 
 	if (IIntuition != NULL)

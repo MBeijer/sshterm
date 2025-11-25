@@ -11,7 +11,8 @@ Usage:
 
 Run from CLI with commandline template:
 
-HOSTADDR/A,PORT/N/K,USER/A,PASSWORD,NOSSHAGENT/S,KEYFILE/K,MAXSB/N/K
+HOSTADDR/A,PORT/N/K,USER/A,PASSWORD,NOSSHAGENT/S,KEYFILE/K,MAXSB/N/K,TITLE/K,
+BSISDEL/S
 
 HOSTADDR is the IP address or domain name of the SSH server.
 
@@ -23,13 +24,27 @@ PASSWORD is the login password or key file passphrase depending on the
 authentication method used. If this argument is left out a password requester
 will be used instead.
 
-NOSSHAGENT stops filesystem from attempting to connect to ssh-agent.
+NOSSHAGENT stops the program from attempting to connect to ssh-agent.
 
 KEYFILE can be used to change the key file used for public key authentication
 (defaults to "$HOME/.ssh/id_rsa" or "HOME:.ssh/id_rsa").
 
 MAXSB is the maximum number of lines stored in the scrollback buffer (set to
 zero to disable this feature). The default value is 2000 lines.
+
+TITLE can be used to set a custom window title. The default window title is
+"Connected to %h as %u". Session dependent information can be added via the
+following escape sequences:
+
+- %p for the port number. The value corresponds to the value set with PORT.
+- %h for the IP address or domain name of the SSH server. The value corresponds 
+     to the value set with HOSTADDR.
+- %u for the user name. The value corresponds to the value set with USER.
+- %% for inserting a single percent sign '%' into the window title.
+
+When BSISDEL is enabled SSHTerm will send an ASCII delete (0x7f) instead of an
+ASCII backspace (0x08) character for the backspace key. Enabling this may lead
+to better compatibility with some remote terminals (see "Known issues" below).
 
 To connect to SSH server example.org using port 123 and user name "testuser":
 

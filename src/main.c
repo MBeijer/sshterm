@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -20,6 +20,7 @@
  */
 
 #include "sshterm.h"
+#include "timer.h"
 
 #include <proto/intuition.h>
 #include <classes/requester.h>
@@ -28,6 +29,8 @@
 
 #include "SSHTerm_rev.h"
 
+#define BLINK_DELAY 1000 /* 1 second delay */
+
 static const char template[] =
 	"HOSTADDR/A,"
 	"PORT/N/K,"
@@ -35,7 +38,9 @@ static const char template[] =
 	"PASSWORD,"
 	"NOSSHAGENT/S,"
 	"KEYFILE/K,"
-	"MAXSB/N/K";
+	"MAXSB/N/K,"
+	"TITLE/K,"
+	"BSISDEL/S";
 
 enum {
 	ARG_HOSTADDR,
@@ -45,6 +50,8 @@ enum {
 	ARG_NOSSHAGENT,
 	ARG_KEYFILE,
 	ARG_MAXSB,
+	ARG_TITLE,
+	ARG_BSISDEL,
 	NUM_ARGS
 };
 
@@ -75,10 +82,17 @@ static char *request_password(unsigned int auth_pw, ...)
 
 			buffer[0] = '\0';
 
-			if (auth_pw == AUTH_PUBLICKEY)
-				vsnprintf(bodytext, sizeof(bodytext), "Enter passphrase for key file '%s'", ap);
-			else
-				vsnprintf(bodytext, sizeof(bodytext), "Enter password for %s@%s", ap);
+			switch (auth_pw) {
+				case AUTH_PUBLICKEY:
+					vsnprintf(bodytext, sizeof(bodytext), "Enter passphrase for key file '%s'", ap);
+					break;
+				case AUTH_KEYBOARD_INTERACTIVE:
+					vsnprintf(bodytext, sizeof(bodytext), "Prompt %d/%d from server: '%s'", ap);
+					break;
+				default:
+					vsnprintf(bodytext, sizeof(bodytext), "Enter password for %s@%s", ap);
+					break;
+			}
 
 			reqobj = IIntuition->NewObject(RequesterClass, NULL,
 				REQ_Type,        REQTYPE_STRING,
@@ -107,7 +121,7 @@ static char *request_password(unsigned int auth_pw, ...)
 
 				if (result && buffer[0] != '\0')
 				{
-					password = strdup(buffer);
+					password = strndup(buffer, sizeof(buffer));
 				}
 
 				IIntuition->DisposeObject(reqobj);
@@ -124,6 +138,88 @@ static char *request_password(unsigned int auth_pw, ...)
 	return password;
 }
 
+/*
+** Supports:
+**	%p for port number PORT
+**	%h for hostname as provided by HOSTADDR
+**  %u for username as provided by USER
+**  %% for single %
+*/
+static char *create_title_string(const char *title_pattern, const LONG *args) {
+	int length, placeholders_count, index;
+	ULONG *placeholders;
+	char *pattern;
+	int pattern_index;
+	int port;
+
+	if (title_pattern == NULL)
+		title_pattern = "Connected to %h as %u";
+
+	length = strlen(title_pattern);
+	placeholders_count = 0;
+	for (index = 0; title_pattern[index] != '\0'; index++)
+	{
+		if (title_pattern[index] == '%')
+		{
+			switch(title_pattern[++index])
+			{
+				case 'p':
+					length++;
+				case 'u':
+				case 'h':
+					placeholders_count++;
+					break;
+				case '%':
+					// skip
+					break;
+				default:
+					fprintf(stderr, "Warning: Unknown/unsupported sublimation character '%c' position %d\n",
+					        title_pattern[index], index);
+					break;
+			}
+		}
+	}
+
+	placeholders = alloca(placeholders_count * sizeof(ULONG));
+	pattern = alloca(length);
+	pattern_index = 0;
+	placeholders_count = 0;
+	for (index = 0; title_pattern[index] != '\0'; index++)
+	{
+		pattern[pattern_index++] = title_pattern[index];
+		if (title_pattern[index] == '%')
+		{
+			switch(title_pattern[++index])
+			{
+				case 'p':
+					port = 22;
+					if (args[ARG_PORT])
+					{
+						port = *(LONG *)args[ARG_PORT];
+					}
+					placeholders[placeholders_count++] = port;
+					pattern[pattern_index++] = 'l';
+					pattern[pattern_index++] = 'd';
+					break;
+				case 'u':
+					placeholders[placeholders_count++] = args[ARG_USER];
+					pattern[pattern_index++] = 's';
+					break;
+				case 'h':
+					placeholders[placeholders_count++] = args[ARG_HOSTADDR];
+					pattern[pattern_index++] = 's';
+					break;
+				default:
+					pattern[pattern_index++] = title_pattern[index];
+					break;
+			}
+		}
+	}
+	pattern[pattern_index++] = '\0';
+
+	return IUtility->VASPrintf(pattern, placeholders);
+}
+
 struct ssh_session {
 	int              socket;
 	LIBSSH2_SESSION *session;
@@ -138,12 +234,16 @@ static void kbd_callback(const char *name, int name_len, const char *instruction
 	int instruction_len, int num_prompts, const LIBSSH2_USERAUTH_KBDINT_PROMPT *prompts,
 	LIBSSH2_USERAUTH_KBDINT_RESPONSE *responses, void **abstract)
 {
-	struct ssh_session *ss = IExec->FindTask(NULL)->tc_UserData;
+	char *prompt, *response;
+	int i;
 
-	if (num_prompts == 1)
-	{
-		responses[0].text   = strdup(ss->password);
-		responses[0].length = strlen(ss->password);
+	for (i = 0; i < num_prompts;  i++) {
+		prompt = strndup(prompts[i].text, prompts[i].length);
+
+		response = request_password(AUTH_KEYBOARD_INTERACTIVE, i+1, num_prompts, prompt);
+
+		responses[i].text   = response;
+		responses[i].length = strlen(response);
 	}
 }
 
@@ -173,7 +273,9 @@ int sshterm(int argc, char **argv)
 	struct RDArgs *rda = NULL;
 	const char *hostname;
 	const char *username;
+	char *windowtitle = NULL;
 	LONG sb_size = 2000;
+	BOOL bs_is_del = FALSE;
 	struct Screen *screen = NULL;
 	struct TermWindow *termwin = NULL;
 	struct ssh_session *ss = NULL;
@@ -186,6 +288,7 @@ int sshterm(int argc, char **argv)
 	const char *userauthlist;
 	unsigned int auth_pw;
 	UWORD columns, rows;
+	struct TimeRequest *blink_timer = NULL;
 	BOOL done;
 	ULONG signals;
 	fd_set rfds, wfds;
@@ -219,7 +322,18 @@ int sshterm(int argc, char **argv)
 			sb_size = 64000;
 	}
 
-	termwin = termwin_open(screen, sb_size);
+	windowtitle = create_title_string((const char *)args[ARG_TITLE], args);
+	if (windowtitle == NULL)
+	{
+		goto out;
+	}
+
+	if (args[ARG_BSISDEL])
+	{
+		bs_is_del = TRUE;
+	}
+
+	termwin = termwin_open(screen, sb_size, windowtitle, bs_is_del);
 	if (termwin == NULL)
 	{
 		fprintf(stderr, "Failed to create terminal\n");
@@ -347,13 +461,6 @@ int sshterm(int argc, char **argv)
 	}
 	else if (auth_pw & AUTH_KEYBOARD_INTERACTIVE)
 	{
-		if (ss->password == NULL)
-		{
-			ss->password = request_password(AUTH_KEYBOARD_INTERACTIVE, username, hostname);
-			if (ss->password == NULL)
-				goto out;
-		}
-
 		rc = libssh2_userauth_keyboard_interactive(ss->session, username, &kbd_callback);
 		if (rc < 0)
 		{
@@ -481,6 +588,15 @@ int sshterm(int argc, char **argv)
 
 	libssh2_session_set_blocking(ss->session, 0);
 
+	blink_timer = timer_open(UNIT_MICROHZ);
+	if (blink_timer == NULL)
+	{
+		fprintf(stderr, "Failed to open timer.device\n");
+		goto out;
+	}
+
+	timer_start(blink_timer, BLINK_DELAY);
+
 	done = FALSE;
 
 	while (!done)
@@ -495,13 +611,9 @@ int sshterm(int argc, char **argv)
 			FD_SET(ss->socket, &wfds);
 		}
 
-		signals = termwin_get_signals(termwin);
+		signals = termwin_get_signals(termwin) | timer_signal(blink_timer);
 
-		#ifdef __CLIB2__
-		rc = waitselect(ss->socket + 1, &rfds, &wfds, NULL, NULL, &signals);
-		#else
-		rc = waitselect(ss->socket + 1, &rfds, &wfds, NULL, NULL, (unsigned int *)&signals);
-		#endif
+		rc = waitselect(ss->socket + 1, &rfds, &wfds, NULL, NULL, (sigmask_t *)&signals);
 		if (rc < 0)
 		{
 			if (errno != EINTR)
@@ -511,6 +623,13 @@ int sshterm(int argc, char **argv)
 			}
 
 			done = TRUE;
+		}
+
+		if (signals & timer_signal(blink_timer))
+		{
+			termwin_blink(termwin);
+			timer_end(blink_timer);
+			timer_start(blink_timer, BLINK_DELAY);
 		}
 
 		if (termwin_handle_input(termwin))
@@ -595,6 +714,13 @@ int sshterm(int argc, char **argv)
 	retval = RETURN_OK;
 
 out:
+	if (blink_timer != NULL)
+	{
+		timer_abort(blink_timer);
+		timer_close(blink_timer);
+		blink_timer = NULL;
+	}
+
 	if (ss != NULL)
 	{
 		if (ss->channel != NULL)
@@ -640,6 +766,11 @@ out:
 	{
 		termwin_close(termwin);
 		termwin = NULL;
+	}
+
+	if (windowtitle != NULL)
+	{
+		IExec->FreeVec(windowtitle);
 	}
 
 	if (AboutWindowPID != 0)

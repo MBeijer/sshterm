@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -25,17 +25,18 @@
 #include <intuition/classes.h>
 #include <intuition/cghooks.h>
 
-#define TERM_Dummy          (0x80840000)
-#define TERM_UserHook       (TERM_Dummy + 1)
-#define TERM_Columns        (TERM_Dummy + 2)
-#define TERM_Rows           (TERM_Dummy + 3)
-#define TERM_Font           (TERM_Dummy + 4)
-#define TERM_MaxScrollback  (TERM_Dummy + 5)
-#define TERM_Scroller       (TERM_Dummy + 6)
-#define TERM_SBTop          (TERM_Dummy + 7)
-#define TERM_SBVisible      (TERM_Dummy + 8)
-#define TERM_SBTotal        (TERM_Dummy + 9)
-#define TERM_BuiltInPalette (TERM_Dummy + 10)
+#define TERM_Dummy             (0x80840000)
+#define TERM_UserHook          (TERM_Dummy + 1)
+#define TERM_Columns           (TERM_Dummy + 2)
+#define TERM_Rows              (TERM_Dummy + 3)
+#define TERM_Font              (TERM_Dummy + 4)
+#define TERM_MaxScrollback     (TERM_Dummy + 5)
+#define TERM_Scroller          (TERM_Dummy + 6)
+#define TERM_SBTop             (TERM_Dummy + 7)
+#define TERM_SBVisible         (TERM_Dummy + 8)
+#define TERM_SBTotal           (TERM_Dummy + 9)
+#define TERM_BuiltInPalette    (TERM_Dummy + 10)
+#define TERM_BackspaceIsDelete (TERM_Dummy + 11)
 
 #define TM_DUMMY           (0x840000)
 #define TM_INPUT           (TM_DUMMY + 1)
@@ -45,6 +46,7 @@
 #define TM_PASTE           (TM_DUMMY + 5)
 #define TM_CLEARSB         (TM_DUMMY + 6)
 #define TM_COPYALL         (TM_DUMMY + 7)
+#define TM_BLINK           (TM_DUMMY + 8)
 
 struct tpInput
 {
@@ -77,10 +79,12 @@ struct tpGeneric
 	struct GadgetInfo *tpg_GInfo;
 };
 
-#define THM_DUMMY  (0x0)
-#define THM_OUTPUT (THM_DUMMY + 1)
-#define THM_RESIZE (THM_DUMMY + 2)
-#define THM_BELL   (THM_DUMMY + 3)
+#define THM_DUMMY       (0x0)
+#define THM_OUTPUT      (THM_DUMMY + 1)
+#define THM_RESIZE      (THM_DUMMY + 2)
+#define THM_BELL        (THM_DUMMY + 3)
+#define THM_WINDOWTITLE (THM_DUMMY + 4)
+#define THM_LOG         (THM_DUMMY + 5)
 
 struct TermHookMsg
 {
@@ -98,6 +102,22 @@ struct TermHookMsg
 		{
 			UWORD        trhm_Columns;
 			UWORD        trhm_Rows;
+		};
+		/* THM_WINDOWTITLE */
+		struct
+		{
+			CONST_STRPTR twthm_Title;
+		};
+		/* THM_LOG */
+		struct
+		{
+			CONST_STRPTR tlhm_File;
+			LONG         tlhm_Line;
+			CONST_STRPTR tlhm_Function;
+			CONST_STRPTR tlhm_Subsystem;
+			ULONG        tlhm_Severity;
+			CONST_STRPTR tlhm_Format;
+			APTR         tlhm_Args;
 		};
 	};
 };

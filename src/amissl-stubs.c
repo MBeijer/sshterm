@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -69,6 +69,11 @@ const EVP_CIPHER *EVP_des_ede3_cbc(void)
 const EVP_CIPHER *EVP_rc4(void)
 {
 	return IAmiSSL->EVP_rc4();
+}
+
+EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x, pem_password_cb *cb, void *u)
+{
+	return IAmiSSL->PEM_read_bio_PrivateKey(bp, x, cb, u);
 }
 
 DSA *PEM_read_bio_DSAPrivateKey(BIO *bp, DSA **x, pem_password_cb *cb, void *u)

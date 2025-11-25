@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -31,6 +31,7 @@
 #include <gadgets/scroller.h>
 
 #include <libtsm.h>
+#include <libtsm-int.h>
 #include <stdlib.h>
 #include <wchar.h>
 #include <stdarg.h>
@@ -76,6 +77,7 @@ struct TermData
 	UWORD              td_Width;
 	UWORD              td_Height;
 	BOOL               td_Layouted:1;
+	BOOL               td_BlinkState:1;
 	struct RastPort   *td_RPort;
 	ULONG              td_Age;
 
@@ -106,11 +108,6 @@ struct TermData
 	ULONG              td_TmpSize;
 	#endif
 
-	#ifdef DEBUG
-	ULONG              td_SkipCount;
-	ULONG              td_UpdateCount;
-	#endif
-
 	struct Screen     *td_Screen;
 };
 
@@ -129,7 +126,7 @@ Class *init_term_gc(void)
 	cl = IIntuition->MakeClass("termgclass", "gadgetclass", NULL, sizeof(struct TermData), 0);
 	if (cl != NULL)
 	{
-		cl->cl_Dispatcher.h_Entry = TERM_dispatch;
+		cl->cl_Dispatcher.h_Entry = (HOOKFUNC)TERM_dispatch;
 	}
 
 	return cl;
@@ -154,6 +151,7 @@ static ULONG TERM_handlemouse(Class *cl, Object *obj, struct tpMouse *tpm);
 static ULONG TERM_copy(Class *cl, Object *obj, struct tpGeneric *tpg);
 static ULONG TERM_paste(Class *cl, Object *obj, struct tpGeneric *tpg);
 static ULONG TERM_clearsb(Class *cl, Object *obj, struct tpGeneric *tpg);
+static ULONG TERM_blink(Class *cl, Object *obj, struct tpGeneric *tpg);
 
 static ULONG TERM_dispatch(Class *cl, Object *obj, Msg msg)
 {
@@ -227,6 +225,10 @@ static ULONG TERM_dispatch(Class *cl, Object *obj, Msg msg)
 			result = TERM_clearsb(cl, obj, (struct tpGeneric *)msg);
 			break;
 
+		case TM_BLINK:
+			result = TERM_blink(cl, obj, (struct tpGeneric *)msg);
+			break;
+
 		default:
 			result = IIntuition->IDoSuperMethodA(cl, obj, msg);
 			break;
@@ -235,11 +237,14 @@ static ULONG TERM_dispatch(Class *cl, Object *obj, Msg msg)
 	return result;
 }
 
-static ULONG call_hook(struct TermData *td, struct Hook *hook, APTR msg)
+static ULONG call_hook(struct TermData *td, struct TermHookMsg *thm)
 {
-	ULONG result;
+	ULONG result = 0;
 
-	result = IUtility->CallHookPkt(hook, td->td_Object, msg);
+	if (td->td_UserHook != NULL)
+	{
+		result = IUtility->CallHookPkt(td->td_UserHook, td->td_Object, thm);
+	}
 
 	return result;
 }
@@ -249,39 +254,109 @@ static void tsm_log_cb(void *data, const char *file, int line,
                        unsigned int sev, const char *format,
                        va_list args)
 {
-	UNUSED struct TermData *td = data;
-
-	/* FIXME: Implement me */
+	struct TermData *td = data;
+	struct TermHookMsg thm;
+	
+	thm.MethodID       = THM_LOG;
+	thm.tlhm_File      = file;
+	thm.tlhm_Line      = line;
+	thm.tlhm_Function  = func;
+	thm.tlhm_Subsystem = subs;
+	thm.tlhm_Severity  = sev;
+	thm.tlhm_Format    = format;
+	thm.tlhm_Args      = args;
+	
+	call_hook(td, &thm);
 }
 
 static void tsm_write_cb(struct tsm_vte *vte, const char *u8,
                          size_t len, void *data)
 {
 	struct TermData *td = data;
+	struct TermHookMsg thm;
 
-	if (td->td_UserHook != NULL)
-	{
-		struct TermHookMsg thm;
+	thm.MethodID    = THM_OUTPUT;
+	thm.tohm_Data   = u8;
+	thm.tohm_Length = len;
 
-		thm.MethodID    = THM_OUTPUT;
-		thm.tohm_Data   = u8;
-		thm.tohm_Length = len;
-
-		call_hook(td, td->td_UserHook, &thm);
-	}
+	call_hook(td, &thm);
 }
 
 static void tsm_bell_cb(struct tsm_vte *vte, void *data)
 {
 	struct TermData *td = data;
+	struct TermHookMsg thm;
 
-	if (td->td_UserHook != NULL)
+	thm.MethodID = THM_BELL;
+
+	call_hook(td, &thm);
+}
+
+static TEXT map_unicode(const ULONG *maptable, ULONG unicode)
+{
+	TEXT ch = '?';
+
+	if (unicode >= 128)
 	{
-		struct TermHookMsg thm;
+		ULONG i;
 
-		thm.MethodID = THM_BELL;
+		for (i = 128; i < 256; i++)
+		{
+			if (maptable[i] == unicode)
+			{
+				ch = (TEXT)i;
+				break;
+			}
+		}
+	}
+	else
+		ch = (TEXT)unicode;
 
-		call_hook(td, td->td_UserHook, &thm);
+	return ch;
+}
+
+static ULONG convert_from_utf8(STRPTR dst, CONST_STRPTR src, ULONG srclen, const ULONG *maptable)
+{
+	struct tsm_utf8_mach mach;
+	ULONG i, j;
+	int state = TSM_UTF8_START;
+	wchar_t ucs4;
+
+	tsm_utf8_mach_init(&mach);
+
+	for (i = j = 0; i < srclen; i++)
+	{
+		state = tsm_utf8_mach_feed(&mach, src[i]);
+		if (state == TSM_UTF8_ACCEPT || state == TSM_UTF8_REJECT)
+		{
+			ucs4 = tsm_utf8_mach_get(&mach);
+			dst[j++] = map_unicode(maptable, ucs4);
+		}
+	}
+
+	if (state >= TSM_UTF8_EXPECT1)
+	{
+		ucs4 = tsm_utf8_mach_get(&mach);
+		dst[j++] = map_unicode(maptable, ucs4);
+	}
+
+	return j;
+}
+
+static void tsm_osc_cb(struct tsm_vte *vte, const char *u8, size_t len, void *data)
+{
+	struct TermData *td = data;
+	struct TermHookMsg thm;
+	TEXT buffer[128];
+
+	if (u8[0] == '2' && u8[1] == ';')
+	{
+		convert_from_utf8(buffer, u8 + 2, len - 2, td->td_MapTable);
+
+		thm.MethodID = THM_WINDOWTITLE;
+		thm.twthm_Title = buffer;
+
+		call_hook(td, &thm);
 	}
 }
 
@@ -313,8 +388,6 @@ static ULONG TERM_new(Class *cl, Object *obj, struct opSet *ops)
 			return (ULONG)NULL;
 		}
 
-		tsm_vte_set_bell_cb(td->td_VTE, tsm_bell_cb, td);
-
 		td->td_Columns = tsm_screen_get_width(td->td_Con);
 		td->td_Rows    = tsm_screen_get_height(td->td_Con);
 
@@ -339,6 +412,9 @@ static ULONG TERM_new(Class *cl, Object *obj, struct opSet *ops)
 		td->td_SBTotal   = td->td_Rows;
 
 		TERM_set(cl, obj, ops);
+
+		tsm_vte_set_bell_cb(td->td_VTE, tsm_bell_cb, td);
+		tsm_vte_set_osc_cb(td->td_VTE, tsm_osc_cb, td);
 	}
 
 	return (ULONG)obj;
@@ -550,6 +626,10 @@ static ULONG TERM_set(Class *cl, Object *obj, struct opSet *ops)
 					refresh = TRUE;
 				}
 				break;
+
+			case TERM_BackspaceIsDelete:
+				tsm_vte_set_backspace_sends_delete(td->td_VTE, tag->ti_Data ? true : false);
+				break;
 		}
 	}
 
@@ -610,10 +690,6 @@ static ULONG TERM_layout(Class *cl, Object *obj, struct gpLayout *gpl)
 
 	IIntuition->GadgetBox(G(obj), gpl->gpl_GInfo, GBD_GINFO, 0, &td->td_IBox);
 
-	#ifdef DEBUG
-	IExec->DebugPrintF("GM_LAYOUT width: %u height: %u\n", td->td_IBox.Width, td->td_IBox.Height);
-	#endif
-
 	columns = td->td_IBox.Width / td->td_CellW;
 	rows = td->td_IBox.Height / td->td_CellH;
 
@@ -625,28 +701,19 @@ static ULONG TERM_layout(Class *cl, Object *obj, struct gpLayout *gpl)
 	if (columns != td->td_Columns || rows != td->td_Rows)
 	{
 		UNUSED int r;
+		struct TermHookMsg thm;
 		ULONG top, visible, total;
 
 		r = tsm_screen_resize(td->td_Con, columns, rows);
-		#ifdef DEBUG
-		if (r < 0)
-			IExec->DebugPrintF("tsm_screen_resize: %d\n", r);
-		}
-		#endif
 
 		td->td_Columns = tsm_screen_get_width(td->td_Con);
 		td->td_Rows = tsm_screen_get_height(td->td_Con);
 
-		if (td->td_UserHook != NULL)
-		{
-			struct TermHookMsg thm;
+		thm.MethodID     = THM_RESIZE;
+		thm.trhm_Columns = td->td_Columns;
+		thm.trhm_Rows    = td->td_Rows;
 
-			thm.MethodID     = THM_RESIZE;
-			thm.trhm_Columns = td->td_Columns;
-			thm.trhm_Rows    = td->td_Rows;
-
-			call_hook(td, td->td_UserHook, &thm);
-		}
+		call_hook(td, &thm);
 
 		top     = tsm_screen_get_sb_top(td->td_Con);
 		visible = tsm_screen_get_sb_visible(td->td_Con);
@@ -691,31 +758,8 @@ static ULONG TERM_layout(Class *cl, Object *obj, struct gpLayout *gpl)
 	return 1;
 }
 
-static TEXT map_unicode(const ULONG *maptable, ULONG unicode)
-{
-	TEXT ch = '?';
-
-	if (unicode >= 128)
-	{
-		ULONG i;
-
-		for (i = 128; i < 256; i++)
-		{
-			if (maptable[i] == unicode)
-			{
-				ch = (TEXT)i;
-				break;
-			}
-		}
-	}
-	else
-		ch = (TEXT)unicode;
-
-	return ch;
-}
-
-static int tsm_draw_cb(struct tsm_screen *con, uint64_t id,
-                       const uint32_t *ch, size_t len, unsigned int width,
+static int tsm_draw_cb(struct tsm_screen *con, const uint32_t *ch,
+                       size_t len, unsigned int width,
                        unsigned int posx, unsigned int posy,
                        const struct tsm_screen_attr *attr, tsm_age_t age,
                        void *data)
@@ -729,27 +773,16 @@ static int tsm_draw_cb(struct tsm_screen *con, uint64_t id,
 	TEXT tmp[1];
 
 	if (age != 0 && age <= td->td_Age)
-	{
-		#ifdef DEBUG
-		td->td_SkipCount++;
-		#endif
 		return 0;
-	}
 
 	if (posy < td->td_MinY || posy > td->td_MaxY)
-	{
-		#ifdef DEBUG
-		td->td_SkipCount++;
-		#endif
 		return 0;
-	}
-
-	#ifdef DEBUG
-	td->td_UpdateCount++;
-	#endif
 
 	cellw = td->td_CellW;
 	cellh = td->td_CellH;
+
+	if (attr->blink && td->td_BlinkState)
+		len = 0;
 
 	#ifdef OFFSCREEN_BUFFER
 	if (len && td->td_TmpRP.BitMap != NULL)
@@ -796,7 +829,10 @@ static int tsm_draw_cb(struct tsm_screen *con, uint64_t id,
 			style |= FSF_UNDERLINED;
 		}
 
-		IGraphics->SetSoftStyle(rp, style, FSF_BOLD | FSF_UNDERLINED);
+		style &= IGraphics->AskSoftStyle(rp);
+
+		/* Algorithmic underline is handled manually in code below */
+		IGraphics->SetSoftStyle(rp, style, FSF_BOLD);
 
 		IGraphics->SetRPAttrs(rp,
 			RPTAG_APenColor, f_argb,
@@ -823,6 +859,12 @@ static int tsm_draw_cb(struct tsm_screen *con, uint64_t id,
 			rp->Layer = NULL;
 		}
 		#endif
+
+		if ((style & FSF_UNDERLINED) && (cellh > (td->td_Baseline + 1)))
+		{
+			IGraphics->Move(rp, x, y + td->td_Baseline + 1);
+			IGraphics->Draw(rp, x + cellw - 1, y + td->td_Baseline + 1);
+		}
 	}
 
 	#ifdef OFFSCREEN_BUFFER
@@ -844,7 +886,7 @@ static int tsm_draw_cb(struct tsm_screen *con, uint64_t id,
 	return 0;
 }
 
-static void render_cells(struct TermData *td, struct RastPort *rp, UWORD miny, UWORD maxy, BOOL domargins)
+static void render_cells(struct TermData *td, struct RastPort *rp, UWORD miny, UWORD maxy)
 {
 	td->td_RPort = rp;
 
@@ -861,53 +903,43 @@ static void render_cells(struct TermData *td, struct RastPort *rp, UWORD miny, U
 		IGraphics->SetFont(rp, td->td_Font);
 	}
 
-	#ifdef DEBUG
-	td->td_SkipCount = 0;
-	td->td_UpdateCount = 0;
-	#endif
-
 	td->td_MinY = miny;
 	td->td_MaxY = maxy;
 
 	td->td_Age = tsm_screen_draw(td->td_Con, &tsm_draw_cb, td);
 
-	#ifdef DEBUG
-	IExec->DebugPrintF("GM_RENDER cells rendered: %lu skipped: %lu\n",
-	                   td->td_UpdateCount, td->td_SkipCount);
-	#endif
-
 	td->td_RPort = NULL;
+}
 
-	if (domargins)
+/* Fill margins with the VTE default background color */
+static void fill_margins(struct TermData *td, struct RastPort *rp)
+{
+	struct tsm_screen_attr attr;
+
+	if (td->td_IBox.Width > td->td_Width || td->td_IBox.Height > td->td_Height)
 	{
-		/* Fill margins with the VTE default background color */
-		struct tsm_screen_attr attr;
+		tsm_vte_get_def_attr(td->td_VTE, &attr);
 
-		if (td->td_IBox.Width > td->td_Width || td->td_IBox.Height > td->td_Height)
+		IGraphics->SetRPAttrs(rp,
+			RPTAG_APenColor, *(ULONG *)(&attr.br - 1) | 0xff000000,
+			TAG_END);
+
+		if (td->td_IBox.Width > td->td_Width)
 		{
-			tsm_vte_get_def_attr(td->td_VTE, &attr);
+			IGraphics->RectFill(rp,
+				                td->td_IBox.Left + td->td_Width,
+				                td->td_IBox.Top,
+				                td->td_IBox.Left + td->td_IBox.Width - 1,
+				                td->td_IBox.Top + td->td_Height - 1);
+		}
 
-			IGraphics->SetRPAttrs(rp,
-				RPTAG_APenColor, *(ULONG *)(&attr.br - 1) | 0xff000000,
-				TAG_END);
-
-			if (td->td_IBox.Width > td->td_Width)
-			{
-				IGraphics->RectFill(rp,
-					                td->td_IBox.Left + td->td_Width,
-					                td->td_IBox.Top,
-					                td->td_IBox.Left + td->td_IBox.Width - 1,
-					                td->td_IBox.Top + td->td_Height - 1);
-			}
-
-			if (td->td_IBox.Height > td->td_Height)
-			{
-				IGraphics->RectFill(rp,
-					                td->td_IBox.Left,
-					                td->td_IBox.Top + td->td_Height,
-					                td->td_IBox.Left + td->td_IBox.Width - 1,
-					                td->td_IBox.Top + td->td_IBox.Height - 1);
-			}
+		if (td->td_IBox.Height > td->td_Height)
+		{
+			IGraphics->RectFill(rp,
+				                td->td_IBox.Left,
+				                td->td_IBox.Top + td->td_Height,
+				                td->td_IBox.Left + td->td_IBox.Width - 1,
+				                td->td_IBox.Top + td->td_IBox.Height - 1);
 		}
 	}
 }
@@ -1007,9 +1039,9 @@ static ULONG TERM_render(Class *cl, Object *obj, struct gpRender *gpr)
 		ILayers->InstallLayerHook(layer, bfh);
 
 		if (scroll < 0)
-			render_cells(td, rp, 0, 1 - scroll, FALSE);
+			render_cells(td, rp, 0, 1 - scroll);
 		else
-			render_cells(td, rp, td->td_Rows - scroll, td->td_Rows - 1, FALSE);
+			render_cells(td, rp, td->td_Rows - scroll, td->td_Rows - 1);
 
 		if (scroll_damage)
 		{
@@ -1018,9 +1050,11 @@ static ULONG TERM_render(Class *cl, Object *obj, struct gpRender *gpr)
 			ILayers->BeginUpdate(layer);
 
 			if (scroll < 0)
-				render_cells(td, rp, -scroll, td->td_Rows - 1, TRUE);
+				render_cells(td, rp, -scroll, td->td_Rows - 1);
 			else
-				render_cells(td, rp, 0, td->td_Rows - scroll - 1, TRUE);
+				render_cells(td, rp, 0, td->td_Rows - scroll - 1);
+
+			fill_margins(td, rp);
 
 			ILayers->EndUpdate(layer, FALSE);
 		}
@@ -1038,7 +1072,9 @@ static ULONG TERM_render(Class *cl, Object *obj, struct gpRender *gpr)
 			td->td_Age = 0;
 		}
 
-		render_cells(td, rp, 0, td->td_Rows - 1, TRUE);
+		render_cells(td, rp, 0, td->td_Rows - 1);
+
+		fill_margins(td, rp);
 	}
 
 	return 1;
@@ -1268,26 +1304,6 @@ static ULONG TERM_handlemouse(Class *cl, Object *obj, struct tpMouse *tpm)
 	return 0;
 }
 
-static ULONG convert_from_utf8(STRPTR dst, CONST_STRPTR src, ULONG srclen, const ULONG *maptable)
-{
-	STRPTR d = dst;
-	CONST_STRPTR s = src;
-	CONST_STRPTR srcend = src + srclen;
-	mbstate_t ps;
-	LONG mblen;
-	wchar_t ucs4;
-
-	memset(&ps, 0, sizeof(ps));
-
-	while ((mblen = mbrtowc(&ucs4, s, srcend - s, &ps)) > 0)
-	{
-		*d++ = map_unicode(maptable, ucs4);
-		s += mblen;
-	}
-
-	return d - dst;
-}
-
 static BOOL write_clip(ULONG unit, CONST_STRPTR utf8, ULONG utf8_len)
 {
 	struct IFFParseIFace *IIFFParse;
@@ -1414,7 +1430,7 @@ static ULONG TERM_copy(Class *cl, Object *obj, struct tpGeneric *tpg)
 {
 	struct TermData *td = INST_DATA(cl, obj);
 	STRPTR utf8;
-	ULONG utf8_len;
+	LONG utf8_len;
 	ULONG result = 0;
 
 	if (tpg->MethodID == TM_COPY)
@@ -1422,7 +1438,7 @@ static ULONG TERM_copy(Class *cl, Object *obj, struct tpGeneric *tpg)
 	else
 		utf8_len = tsm_screen_copy_all(td->td_Con, &utf8);
 
-	if (utf8_len > 0)
+	if (utf8_len >= 0)
 	{
 		result = write_clip(PRIMARY_CLIP, utf8, utf8_len);
 
@@ -1634,21 +1650,32 @@ static ULONG TERM_paste(Class *cl, Object *obj, struct tpGeneric *tpg)
 	result = read_clip(PRIMARY_CLIP, &utf8, &utf8_len);
 	if (result)
 	{
-		CONST_STRPTR u8 = utf8;
-		CONST_STRPTR u8end = utf8 + utf8_len;
-		mbstate_t ps;
-		LONG mblen;
+		struct tsm_utf8_mach mach;
+		ULONG i;
+		int state = TSM_UTF8_START;
 		wchar_t ucs4;
+		UWORD code;
 
-		memset(&ps, 0, sizeof(ps));
+		tsm_utf8_mach_init(&mach);
 
-		while ((mblen = mbrtowc(&ucs4, u8, u8end - u8, &ps)) > 0)
+		for (i = 0; i < utf8_len; i++)
 		{
-			UWORD code = (ucs4 == '\n') ? RAWKEY_RETURN : 0;
+			state = tsm_utf8_mach_feed(&mach, utf8[i]);
+			if (state == TSM_UTF8_ACCEPT || state == TSM_UTF8_REJECT)
+			{
+				ucs4 = tsm_utf8_mach_get(&mach);
+				code = (ucs4 == '\n') ? RAWKEY_RETURN : 0;
+
+				tsm_vte_handle_keyboard_amiga(td->td_VTE, code, 0, ucs4);
+			}
+		}
+
+		if (state >= TSM_UTF8_EXPECT1)
+		{
+			ucs4 = tsm_utf8_mach_get(&mach);
+			code = (ucs4 == '\n') ? RAWKEY_RETURN : 0;
 
 			tsm_vte_handle_keyboard_amiga(td->td_VTE, code, 0, ucs4);
-
-			u8 += mblen;
 		}
 
 		free(utf8);
@@ -1683,6 +1710,23 @@ static ULONG TERM_clearsb(Class *cl, Object *obj, struct tpGeneric *tpg)
 				TAG_END);
 		}
 
+		IIntuition->DoRender(obj, tpg->tpg_GInfo, GREDRAW_UPDATE);
+	}
+
+	return TRUE;
+}
+
+static ULONG TERM_blink(Class *cl, Object *obj, struct tpGeneric *tpg)
+{
+	struct TermData *td = INST_DATA(cl, obj);
+	bool r;
+
+	td->td_BlinkState ^= 1;
+
+	r = tsm_screen_blink(td->td_Con);
+
+	if (r && tpg->tpg_GInfo != NULL)
+	{
 		IIntuition->DoRender(obj, tpg->tpg_GInfo, GREDRAW_UPDATE);
 	}
 

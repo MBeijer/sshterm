@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -25,21 +25,28 @@
 #include <proto/exec.h>
 #include <proto/utility.h>
 #include <proto/dos.h>
-#include <proto/z.h>
-#include <proto/bsdsocket.h>
-#include <proto/amissl.h>
 #include <proto/diskfont.h>
 #include <proto/graphics.h>
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
+#include <proto/asl.h>
 #include <proto/keymap.h>
 #include <proto/layers.h>
 #include <proto/icon.h>
+#include <proto/z.h>
+#include <proto/bsdsocket.h>
+#include <proto/amissl.h>
 
 #include <libssh2.h>
 
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef __CLIB2__
+typedef ULONG sigmask_t;
+#else
+typedef unsigned int sigmask_t;
+#endif
 
 extern Class *MenuClass;
 extern Class *WindowClass;
@@ -57,8 +64,9 @@ void close_interface(struct Interface *interface);
 
 int sshterm(int argc, char **argv);
 
-struct TermWindow *termwin_open(struct Screen *screen, ULONG max_sb);
+struct TermWindow *termwin_open(struct Screen *screen, ULONG max_sb, const char *win_title, BOOL bs_is_del);
 void termwin_close(struct TermWindow *tw);
+void termwin_set_title( struct TermWindow *tw, const char *wintitle);
 void termwin_set_max_sb(struct TermWindow *tw, ULONG max_sb);
 void termwin_write(struct TermWindow *tw, const char *buffer, size_t len);
 void termwin_refresh(struct TermWindow *tw);
@@ -68,6 +76,7 @@ size_t termwin_poll(struct TermWindow *tw);
 ssize_t termwin_read(struct TermWindow *tw, char *buffer, size_t len);
 BOOL termwin_poll_new_size(struct TermWindow *tw);
 void termwin_get_size(struct TermWindow *tw, UWORD *columns, UWORD *rows);
+void termwin_blink(struct TermWindow *tw);
 
 BOOL aboutwin_open(struct Screen *screen);
 void aboutwin_close(void);

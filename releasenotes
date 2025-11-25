@@ -76,3 +76,32 @@ SSHTerm 1.7 (23.3.2020)
 
 - Compiled using AmiSSL 4.4.
 
+
+SSHTerm 1.8 (30.10.2020)
+
+- Added blink support (uses a hardcoded 1 second delay for now).
+
+- Fixed the gaps in the underline when rendering non-bold, underlined text.
+
+- Replaced mbrtowc() for parsing UTF-8 with the tsm_utf8_mach parser from
+  libtsm.
+
+- Added "Select Font..." menu item.
+
+
+SSHTerm 1.9 (23.11.2022)
+
+- Fixed negative return codes from tsm_screen_selection_copy()/
+  tsm_screen_copy_all() not being interpreted correctly due to the result
+  being assigned to an ULONG variable.
+
+- Merged custom window title support changes from migthymax.
+
+- Updated libssh2 to version 1.10.0.
+
+- Updated to compile with AmiSSL 5.1 SDK.
+
+- Added BSISDEL switch that makes libtsm send an ASCII delete (0x7f) instead
+  of an ASCII backspace (0x08) character for the backspace key. Enabling this
+  may lead to better compatibility with some remote terminals.
+

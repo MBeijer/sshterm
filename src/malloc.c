@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -134,11 +134,32 @@ void free(void *ptr)
 
 char *strdup(const char *src)
 {
+	size_t len;
 	char *dst;
 
-	dst = malloc(strlen(src) + 1);
+	len = strlen(src);
+	dst = malloc(len + 1);
 	if (dst != NULL)
-		strcpy(dst, src);
+	{
+		memcpy(dst, src, len);
+		dst[len] = '\0';
+	}
+
+	return dst;
+}
+
+char *strndup(const char *src, size_t maxlen)
+{
+	size_t len;
+	char *dst;
+
+	len = strnlen(src, maxlen);
+	dst = malloc(len + 1);
+	if (dst != NULL)
+	{
+		memcpy(dst, src, len);
+		dst[len] = '\0';
+	}
 
 	return dst;
 }

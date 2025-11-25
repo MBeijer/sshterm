@@ -1,7 +1,7 @@
 /*
  * SSHTerm - SSH2 shell client
  *
- * Copyright (C) 2019-2020 Fredrik Wikstrom <fredrik@a500.org>
+ * Copyright (C) 2019-2022 Fredrik Wikstrom <fredrik@a500.org>
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -19,6 +19,9 @@
  * Foundation,Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+/* Fixes a warning when compiling with older roadshow includes */
+#define __timeval timeval
+
 #include <proto/bsdsocket.h>
 #include <sys/filio.h>
 #include <sys/socket.h>
@@ -26,6 +29,12 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <errno.h>
+
+#ifdef __CLIB2__
+typedef ULONG sigmask_t;
+#else
+typedef unsigned int sigmask_t;
+#endif
 
 int socket(int domain, int type, int protocol)
 {
@@ -63,13 +72,8 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 	return ISocket->WaitSelect(nfds, readfds, writefds, exceptfds, timeout, NULL);
 }
 
-#ifdef __CLIB2__
 int waitselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-	struct timeval *timeout, ULONG *signals)
-#else
-int waitselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-	struct timeval *timeout, unsigned int *signals)
-#endif
+	struct timeval *timeout, sigmask_t *signals)
 {
 	return ISocket->WaitSelect(nfds, readfds, writefds, exceptfds, timeout, (ULONG *)signals);
 }
